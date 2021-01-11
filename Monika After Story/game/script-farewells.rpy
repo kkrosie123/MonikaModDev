@@ -13,101 +13,123 @@
 default persistent.mas_late_farewell = False
 
 init -1 python in mas_farewells:
+    import datetime
+    import store
+
+    def _filterFarewell(
+            ev,
+            curr_pri,
+            aff,
+            check_time,
+        ):
+        """
+        Filters a farewell for the given type, among other things.
+
+        IN:
+            ev - ev to filter
+            curr_pri - current loweset priority to compare to
+            aff - affection to use in aff_range comparisons
+            check_time - datetime to check against timed rules
+
+        RETURNS:
+            True if this ev passes the filter, False otherwise
+        """
+        # NOTE: new rules:
+        #   eval in this order:
+        #   1. hidden via bitmask
+        #   2. unlocked
+        #   3. not pooled
+        #   4. aff_range
+        #   5. priority (lower or same is True)
+        #   6. all rules
+        #   7. conditional
+        #       NOTE: this is never cleared. Please limit use of this
+        #           property as we should aim to use lock/unlock as primary way
+        #           to enable or disable greetings.
+
+        # check if hidden from random select
+        if ev.anyflags(store.EV_FLAG_HFRS):
+            return False
+
+        #Make sure the ev is unlocked
+        if not ev.unlocked:
+            return False
+
+        #If the event is pooled, then we cannot have this in the selection
+        if ev.pool:
+            return False
+
+        #Verify we're within the aff bounds
+        if not ev.checkAffection(aff):
+            return False
+
+        #Priority check
+        if store.MASPriorityRule.get_priority(ev) > curr_pri:
+            return False
+
+        #Since this event checks out in the other areas, finally we'll evaluate the rules
+        if not (
+            store.MASSelectiveRepeatRule.evaluate_rule(check_time, ev, defval=True)
+            and store.MASNumericalRepeatRule.evaluate_rule(check_time, ev, defval=True)
+            and store.MASGreetingRule.evaluate_rule(ev, defval=True)
+        ):
+            return False
+
+        #Conditional check (Since it's ideally least likely to be used)
+        if ev.conditional is not None and not eval(ev.conditional, store.__dict__):
+            return False
+
+        # otherwise, we passed all tests
+        return True
 
     # custom farewell functions
-    def selectFarewell():
+    def selectFarewell(check_time=None):
         """
-        Selects a farewell to be used. This evaluates rules and stuff
-        appropriately.
+        Selects a farewell to be used. This evaluates rules and stuff appropriately.
+
+        IN:
+            check_time - time to use when doing date checks
+                If None, we use current datetime
+                (Default: None)
 
         RETURNS:
             a single farewell (as an Event) that we want to use
         """
+        # local reference of the gre database
+        fare_db = store.evhand.farewell_database
 
-        # check if we have moni_wants farewells
-        moni_wants_farewells = renpy.store.Event.filterEvents(
-            renpy.store.evhand.farewell_database,
-            unlocked=True,
-            pool=False, # may as well not filter these
-            moni_wants=True
-        )
+        # setup some initial values
+        fare_pool = []
+        curr_priority = 1000
+        aff = store.mas_curr_affection
 
+        if check_time is None:
+            check_time = datetime.datetime.now()
 
-        if moni_wants_farewells is not None and len(moni_wants_farewells) > 0:
+        # now filter
+        for ev_label, ev in fare_db.iteritems():
+            if _filterFarewell(
+                ev,
+                curr_priority,
+                aff,
+                check_time
+            ):
+                # change priority levels and stuff if needed
+                ev_priority = store.MASPriorityRule.get_priority(ev)
+                if ev_priority < curr_priority:
+                    curr_priority = ev_priority
+                    fare_pool = []
 
-            # select one label randomly
-            return moni_wants_farewells[
-                renpy.random.choice(moni_wants_farewells.keys())
-            ]
+                # add to pool
+                fare_pool.append((
+                    ev, store.MASProbabilityRule.get_probability(ev)
+                ))
 
-        # now filter events by their unlocked property
-        unlocked_farewells = renpy.store.Event.filterEvents(
-            renpy.store.evhand.farewell_database,
-            unlocked=True,
-            pool=False
-        )
+        # not having a greeting to show means no greeting.
+        if len(fare_pool) == 0:
+            return None
 
-        # filter farewells using the affection rules dict
-        unlocked_farewells = renpy.store.Event.checkAffectionRules(
-            unlocked_farewells,
-            keepNoRule=True
-        )
-
-        # filter farewells using the special rules dict
-        random_farewells_dict = renpy.store.Event.checkRepeatRules(
-            unlocked_farewells
-        )
-
-        # check if we have a farewell that actually should be shown now
-        if len(random_farewells_dict) > 0:
-
-            # select one label randomly
-            return random_farewells_dict[
-                renpy.random.choice(random_farewells_dict.keys())
-            ]
-
-        # since we don't have special farewells for this time we now check for special random chance
-        # pick a farewell filtering by special random chance rule
-        random_farewells_dict = renpy.store.Event.checkFarewellRules(
-            unlocked_farewells
-        )
-
-        # check if we have a farewell that actually should be shown now
-        if len(random_farewells_dict) > 0:
-
-            # select on label randomly
-            return random_farewells_dict[
-                renpy.random.choice(random_farewells_dict.keys())
-            ]
-
-        # We couldn't find a suitable farewell we have to default to normal random selection
-        # filter random events normally
-        random_unlocked_farewells = renpy.store.Event.filterEvents(
-            unlocked_farewells,
-            random=True
-        )
-
-        # check if we have farewell available to display with current filter
-        if len(random_unlocked_farewells) > 0:
-            # select one randomly
-            return random_unlocked_farewells[
-               renpy.random.choice(random_unlocked_farewells.keys())
-            ]
-
-        # We couldn't find a suitable farewell we have to default to normal random selection
-        # filter random events normally
-        renpy.log("rip we need update script")
-        random_farewells_dict = renpy.store.Event.filterEvents(
-            renpy.store.evhand.greeting_database,
-            unlocked=True,
-            random=True,
-            excl_cat=list()
-        )
-
-        # select one randomly
-        return random_farewells_dict[
-            renpy.random.choice(random_farewells_dict.keys())
-        ]
+        return store.mas_utils.weightedChoice(fare_pool)
 
 # farewells selection label
 label mas_farewell_start:
@@ -124,10 +146,15 @@ label mas_farewell_start:
     python:
         # preprocessing menu
         # TODO: consider including processing the rules dict as well
+
+        Event.checkEvents(evhand.farewell_database)
+
         bye_pool_events = Event.filterEvents(
             evhand.farewell_database,
             unlocked=True,
-            pool=True
+            pool=True,
+            aff=mas_curr_affection,
+            flag_ban=EV_FLAG_HFM
         )
 
     if len(bye_pool_events) > 0:
@@ -140,17 +167,17 @@ label mas_farewell_start:
             ]
 
             # add the random selection
-            bye_prompt_list.append(("Goodbye.", -1, False, False))
+            bye_prompt_list.append((_("Goodbye."), -1, False, False))
 
             # setup the last option
-            bye_prompt_back = ("Nevermind.", False, False, False, 20)
+            bye_prompt_back = (_("Nevermind."), False, False, False, 20)
 
         # call the menu
         call screen mas_gen_scrollable_menu(bye_prompt_list, evhand.UNSE_AREA, evhand.UNSE_XALIGN, bye_prompt_back)
 
         if not _return:
-            # user its nevermind
-            return
+            # nevermind
+            return _return
 
         if _return != -1:
             # push teh selected event
@@ -174,27 +201,23 @@ label mas_farewell_start:
 ###
 
 init 5 python:
-    rules = dict()
-    rules.update(MASAffectionRule.create_rule(min=-29,max=None))
     addEvent(
         Event(
             persistent.farewell_database,
             eventlabel="bye_leaving_already",
             unlocked=True,
-            random=True,#TODO update script
-            rules=rules
+            random=True,
+            conditional="mas_getSessionLength() <= datetime.timedelta(minutes=20)",
+            aff_range=(mas_aff.NORMAL, None)
         ),
         code="BYE"
     )
-    del rules
 
 label bye_leaving_already:
-    m 1tkc "Aw, leaving already?"
+    m 1ekc "Aw, leaving already?"
     m 1eka "It's really sad whenever you have to go..."
     m 3eua "Just be sure to come back as soon as you can, okay?"
-    m "I love you so much, [player]. Stay safe!"
-    #Don't show this farewell again
-    $evhand.farewell_database["bye_leaving_already"].random=False
+    m 3hua "I love you so much, [player]. Stay safe!"
     return 'quit'
 
 init 5 python:
@@ -213,7 +236,7 @@ label bye_goodbye:
         m 1eua "Goodbye, [player]!"
 
     elif mas_isMoniUpset():
-        m 2efc "Goodbye."
+        m 2esc "Goodbye."
 
     elif mas_isMoniDis():
         m 6rkc "Oh...{w=1} Goodbye."
@@ -225,57 +248,48 @@ label bye_goodbye:
     return 'quit'
 
 init 5 python:
-    rules = dict()
-    rules.update(MASAffectionRule.create_rule(min=-29,max=None))
     addEvent(
         Event(
             persistent.farewell_database,
             eventlabel="bye_sayanora",#sayanora? yes
             unlocked=True,
             random=True,
-            rules=rules
+            aff_range=(mas_aff.NORMAL, None)
         ),
         code="BYE"
     )
-    del rules
 
 label bye_sayanora:
     m 1hua "Sayonara, [player]~"
     return 'quit'
 
 init 5 python:
-    rules = dict()
-    rules.update(MASAffectionRule.create_rule(min=-29,max=None))
     addEvent(
         Event(
             persistent.farewell_database,
             eventlabel="bye_farewellfornow",
             unlocked=True,
             random=True,
-            rules=rules
+            aff_range=(mas_aff.NORMAL, None)
         ),
         code="BYE"
     )
-    del rules
 
 label bye_farewellfornow:
     m 1eka "Farewell for now, my love~"
     return 'quit'
 
 init 5 python:
-    rules = dict()
-    rules.update(MASAffectionRule.create_rule(min=-29,max=None))
     addEvent(
         Event(
             persistent.farewell_database,
             eventlabel="bye_untilwemeetagain",
             unlocked=True,
             random=True,
-            rules=rules
+            aff_range=(mas_aff.NORMAL, None)
         ),
         code="BYE"
     )
-    del rules
 
 label bye_untilwemeetagain:
     m 2eka "'{i}Goodbyes are not forever, Goodbyes are not the end. They simply mean I'll miss you, Until we meet again.{/i}'"
@@ -283,19 +297,16 @@ label bye_untilwemeetagain:
     return 'quit'
 
 init 5 python:
-    rules = dict()
-    rules.update(MASAffectionRule.create_rule(min=-29,max=None))
     addEvent(
         Event(
             persistent.farewell_database,
             eventlabel="bye_take_care",
             unlocked=True,
             random=True,
-            rules=rules
+            aff_range=(mas_aff.NORMAL, None)
         ),
         code="BYE"
     )
-    del rules
 
 
 label bye_take_care:
@@ -305,7 +316,8 @@ label bye_take_care:
 
 init 5 python:
     rules = dict()
-    rules.update(MASSelectiveRepeatRule.create_rule(hours=range(21,24)))
+    rules.update(MASSelectiveRepeatRule.create_rule(hours=[0,20,21,22,23]))
+    rules.update(MASPriorityRule.create_rule(50))
     addEvent(
         Event(
             persistent.farewell_database,
@@ -318,13 +330,22 @@ init 5 python:
     del rules
 
 label bye_going_to_sleep:
+    #TODO: TC-O things
     if mas_isMoniNormal(higher=True):
-        m 1esa "Are you going to sleep, [player]?"
-        m 1eka "I'll be seeing you in your dreams."
+        m 1esa "Are you going to sleep, [player]?{nw}"
+        $ _history_list.pop()
+        menu:
+            m "Are you going to sleep, [player]?{fast}"
+
+            "Yeah.":
+                m 1eka "I'll be seeing you in your dreams."
+
+            "Not yet.":
+                m 1eka "Okay. {w=0.3}Have a good evening~"
 
     elif mas_isMoniUpset():
-        m 2efc "Going to sleep, [player]?"
-        m 2esc "Goodnight."
+        m 2esc "Going to sleep, [player]?"
+        m "Goodnight."
 
     elif mas_isMoniDis():
         m 6rkc "Oh...goodnight, [player]."
@@ -381,9 +402,9 @@ label bye_prompt_to_class:
             m 1hka "I'll be waiting for you to come back. Stay safe."
 
     elif mas_isMoniUpset():
-        m 2efc "Fine, [player]."
-        m 2tfc "Hopefully you at least learn {i}something{/i} today."
-        m "{cps=*2}Like how to treat people better.{/cps}{nw}"
+        m 2esc "Fine, [player]."
+        m "Hopefully you at least learn {i}something{/i} today."
+        m 2efc "{cps=*2}Like how to treat people better.{/cps}{nw}"
 
     elif mas_isMoniDis():
         m 6rkc "Oh, okay [player]..."
@@ -394,6 +415,7 @@ label bye_prompt_to_class:
     # TODO:
     # can monika join u at schools?
     $ persistent._mas_greeting_type = store.mas_greetings.TYPE_SCHOOL
+    $ persistent._mas_greeting_type_timeout = datetime.timedelta(hours=20)
     return 'quit'
 
 init 5 python:
@@ -418,7 +440,7 @@ label bye_prompt_to_work:
             m 3hub "Work hard, [player]! Make me proud!"
         elif session_time < datetime.timedelta(hours=1):
             m 1hksdlb "Oh! Alright! I was starting to get really comfortable, ahaha."
-            m 1rusdlb "I was expecting us to be a here a bit longer, but you're a busy [guy]!"
+            m 1rusdlb "I was expecting us to be here a bit longer, but you're a busy [guy]!"
             m 1eka "It was great seeing you, even if it wasn't as long as I wanted..."
             m 1kua "But then if it were up to me I'd have you all day!"
             m 1hua "I'll be here waiting for you to get back home from work!"
@@ -439,7 +461,7 @@ label bye_prompt_to_work:
             m 3eua "Stay safe, [player]!"
 
     elif mas_isMoniUpset():
-        m 2efc "Fine, [player], guess I'll see you after work."
+        m 2esc "Fine, [player], guess I'll see you after work."
 
     elif mas_isMoniDis():
         m 6rkc "Oh...{w=1} Okay."
@@ -450,6 +472,7 @@ label bye_prompt_to_work:
     # TODO:
     # can monika join u at work
     $ persistent._mas_greeting_type = store.mas_greetings.TYPE_WORK
+    $ persistent._mas_greeting_type_timeout = datetime.timedelta(hours=20)
     return 'quit'
 
 init 5 python:
@@ -480,7 +503,7 @@ label bye_prompt_sleep:
             m 1hua "Sweet dreams!"
 
         elif mas_isMoniUpset():
-            m 2efc "Goodnight, [player]."
+            m 2esc "Goodnight, [player]."
 
         elif mas_isMoniDis():
             m 6ekc "Okay...{w=1} Goodnight, [player]."
@@ -497,10 +520,10 @@ label bye_prompt_sleep:
 
         elif mas_isMoniUpset():
             m 2efc "Maybe you'd be in a better mood if you went to bed at a better time..."
-            m "Goodnight."
+            m 2esc "Goodnight."
 
         elif mas_isMoniDis():
-            m 6rkc "Maybe you should start going to bed a littler earlier, [player]..."
+            m 6rkc "Maybe you should start going to bed a little earlier, [player]..."
             m 6dkc "It might make you--{w=1}us--{w=1}happier."
 
         else:
@@ -531,7 +554,7 @@ label bye_prompt_sleep:
             m 6ekc "I'll see you after you get some rest...{w=1}hopefully."
 
         else:
-            6ckc "..."
+            m 6ckc "..."
 
     elif 5 <= curr_hour < 12:
         # you probably stayed up the whole night
@@ -551,7 +574,7 @@ label bye_prompt_sleep:
                     pass
                 "[_cantsee_b]":
                     pass
-            m "I thought so.{w} Go get some rest, [player]."
+            m "I thought so.{w=0.2} Go get some rest, [player]."
             if mas_isMoniNormal(higher=True):
                 m 2ekc "I wouldn't want you to get sick."
                 m 1eka "Sleep earlier next time, okay?"
@@ -566,8 +589,8 @@ label bye_prompt_sleep:
             m 1hua "Ahaha~ Have a good nap, [player]."
 
         elif mas_isMoniUpset():
-            m 2efc "Taking a nap, [player]?"
-            m 2tfc "Yeah, that's probably a good idea."
+            m 2esc "Taking a nap, [player]?"
+            m 2tsc "Yeah, that's probably a good idea."
 
         elif mas_isMoniDis():
             m 6ekc "Going to take a nap, [player]?"
@@ -600,9 +623,9 @@ label bye_prompt_sleep:
                     m "Fine."
 
         elif mas_isMoniUpset():
-            m 2efc "Going to bed already?"
-            m 2tfc "Well, it does seem like you could use the extra sleep..."
-            m "Goodnight."
+            m 2esc "Going to bed already?"
+            m 2tud "Well, it does seem like you could use the extra sleep..."
+            m 2tsc "Goodnight."
 
         elif mas_isMoniDis():
             m 6rkc "Oh...{w=1}it seems a little early to be going to sleep, [player]."
@@ -619,7 +642,7 @@ label bye_prompt_sleep:
 
     # TODO:
     #   join monika sleeping?
-
+    $ persistent._mas_greeting_type_timeout = datetime.timedelta(hours=13)
     $ persistent._mas_greeting_type = store.mas_greetings.TYPE_SLEEP
     return 'quit'
 
@@ -634,6 +657,7 @@ label bye_illseeyou:
 init 5 python: ## Implementing Date/Time for added responses based on the time of day
     rules = dict()
     rules.update(MASSelectiveRepeatRule.create_rule(hours=range(6,11)))
+    rules.update(MASProbabilityRule.create_rule(6))
     addEvent(
         Event(
             persistent.farewell_database,
@@ -652,8 +676,8 @@ label bye_haveagoodday:
         m 1hua "I'll be here waiting for you when you get back."
 
     elif mas_isMoniUpset():
-        m 2efc "Leaving for the day, [player]?"
-        m "I'll be here, waiting, as usual."
+        m 2esc "Leaving for the day, [player]?"
+        m 2efc "I'll be here, waiting...{w=0.5}as usual."
 
     elif mas_isMoniDis():
         m 6rkc "Oh."
@@ -666,6 +690,7 @@ label bye_haveagoodday:
 init 5 python:
     rules = dict()
     rules.update(MASSelectiveRepeatRule.create_rule(hours=range(12,16)))
+    rules.update(MASProbabilityRule.create_rule(6))
     addEvent(
         Event(
             persistent.farewell_database,
@@ -700,6 +725,7 @@ label bye_enjoyyourafternoon:
 init 5 python:
     rules = dict()
     rules.update(MASSelectiveRepeatRule.create_rule(hours=range(17,19)))
+    rules.update(MASProbabilityRule.create_rule(6))
     addEvent(
         Event(
             persistent.farewell_database,
@@ -718,8 +744,8 @@ label bye_goodevening:
         m 1eua "Until then, have a good evening."
 
     elif mas_isMoniUpset():
-        m 2efc "Goodbye, [player]."
-        m "I wonder if you'll even come back to say goodnight to me."
+        m 2esc "Goodbye, [player]."
+        m 2dsc "I wonder if you'll even come back to say goodnight to me."
 
     elif mas_isMoniDis():
         m 6dkc "Oh...{w=1}okay."
@@ -733,7 +759,8 @@ label bye_goodevening:
 
 init 5 python:
     rules = dict()
-    rules.update(MASSelectiveRepeatRule.create_rule(hours=range(20,24)))
+    rules.update(MASSelectiveRepeatRule.create_rule(hours=[0,20,21,22,23]))
+    rules.update(MASPriorityRule.create_rule(50))
     addEvent(
         Event(
             persistent.farewell_database,
@@ -746,14 +773,26 @@ init 5 python:
     del rules
 
 label bye_goodnight:
+    #TODO: Dlg flow for TC-O things
     if mas_isMoniNormal(higher=True):
-        m 1eua "Goodnight, [player]."
-        m 1eka "I'll see you tomorrow, okay?"
-        m 3eka "Remember, 'Sleep tight, and don't let the bedbugs bite', ehehe."
-        m 1ekbfa "I love you~"
+        m 3eka "Going to sleep?{nw}"
+        $ _history_list.pop()
+        menu:
+            m "Going to sleep?{fast}"
+
+            "Yeah.":
+                m 1eua "Goodnight, [player]."
+                m 1eka "I'll see you tomorrow, okay?"
+                m 3eka "Remember, 'sleep tight, don't let the bedbugs bite,' ehehe."
+                m 1ekbfa "I love you~"
+
+            "Not yet.":
+                m 1eka "Okay, [player]..."
+                m 3hub "Enjoy your evening!"
+                m 3rksdlb "Try not to stay up too late, ehehe~"
 
     elif mas_isMoniUpset():
-        m 2efc "Goodnight."
+        m 2esc "Goodnight."
 
     elif mas_isMoniDis():
         m 6lkc "...Goodnight."
@@ -782,7 +821,7 @@ label bye_long_absence:
         jump bye_long_absence_2
     $ persistent._mas_long_absence = True
     m 1ekc "Aw...that's pretty saddening..."
-    m 1eka "I really am going to miss you [player]!"
+    m 1eka "I really am going to miss you, [player]!"
     m 3rksdla "I'm not really sure what I'm going to do with myself while you're gone..."
     m 3esa "Thank you for warning me first, though. It really does help."
     m 2lksdlb "I would be worried sick otherwise!"
@@ -798,8 +837,8 @@ label bye_long_absence:
             $ persistent._mas_absence_choice = "days"
             m 1eub "Oh!"
             m 1hua "Nowhere near as long as I feared then."
-            m 3rksdla "Geez, you really did worry me..."
-            m 3esa "Don't worry about me though [player]."
+            m 3rksdla "Jeez, you really did worry me..."
+            m 3esa "Don't worry about me though, [player]."
             m "I can cope waiting that long with ease."
             m 3eka "I'll still miss you greatly though."
         "A week.":
@@ -817,7 +856,7 @@ label bye_long_absence:
             m 2eka "Try to come back as soon as possible... I'll be waiting for you."
         "A month.":
             $ persistent._mas_absence_choice = "month"
-            if mas_curr_affection_group == store.mas_affection.G_HAPPY:
+            if mas_isMoniHappy(higher=True):
                 m 3euc "Oh wow, that's a long time."
                 m 3rksdla "A bit too long for my liking really..."
                 m 2esa "But it's okay [player]."
@@ -835,7 +874,7 @@ label bye_long_absence:
                 m 1dsd "I'll still wait for you...but please come back the moment it's possible for you to do so."
         "Longer than a month.":
             $ persistent._mas_absence_choice = "longer"
-            if mas_curr_affection_group == store.mas_affection.G_HAPPY:
+            if mas_isMoniHappy(higher=True):
                 m 3rksdlb "That's...{w=0.5}well that's a little scary, [player]."
                 m "I'm not really sure what I'm going to do with myself while you're gone."
                 m 1eka "But I know you wouldn't leave me by myself if you could help it."
@@ -877,7 +916,7 @@ label bye_long_absence:
         m "Are you going to leave straight away?{fast}"
         "Yes.":
             m 3ekc "I see..."
-            m "I really will miss you [player]..."
+            m "I really will miss you, [player]..."
             m 1eka "But I know you'll do wonderful things no matter where you are."
             m "Just remember that I'll be waiting here for you."
             m 2hua "Make me proud, [player]!"
@@ -965,18 +1004,7 @@ label bye_going_somewhere:
         jump bye_going_somewhere_normalplus_flow
 
 label bye_going_somewhere_post_aff_check:
-
-    if mas_isO31():
-        m 1wub "Oh! Are we going trick or treating, [player]?{nw}"
-        $ _history_list.pop()
-        menu:
-            m "Oh! Are we going trick or treating, [player]?{fast}"
-            "Yes.":
-                jump bye_trick_or_treat
-
-            "No.":
-                m 2ekp "Oh, okay."
-
+    pass
 
 label bye_going_somewhere_iostart:
     # NOTE: jump back to this label to begin io generation
@@ -995,35 +1023,44 @@ label bye_going_somewhere_iowait:
     # we want to display the menu first to give users a chance to quit
     if first_pass:
         $ first_pass = False
+        m 1eua "Give me a second to get ready."
+
+        #Prepare the current drink to be removed if needed
+        python:
+            current_drink = MASConsumable._getCurrentDrink()
+            if current_drink and current_drink.portable:
+                current_drink.acs.keep_on_desk = False
+
+        #Get Moni off screen
+        call mas_transition_to_emptydesk
 
     elif promise.done():
         # i/o thread is done!
         jump bye_going_somewhere_rtg
-    else:
-        #clean up the history list so only one "give me a second..." should show up
-        $ _history_list.pop()
 
     # display menu options
     # 4 seconds seems decent enough for waiting.
     show screen mas_background_timed_jump(4, "bye_going_somewhere_iowait")
     menu:
-        m "Give me a second to get ready.{fast}"
-        "Wait, wait!":
+        "Hold on a second!":
             hide screen mas_background_timed_jump
             $ persistent._mas_dockstat_cm_wait_count += 1
 
     # fall thru to the wait wait flow
-    show monika 1ekc
     menu:
         m "What is it?"
         "Actually, I can't take you right now.":
             call mas_dockstat_abort_gen
+
+            #Show Monika again
+            call mas_transition_from_emptydesk("monika 1ekc")
+            call mas_dockstat_abort_post_show
             jump bye_going_somewhere_leavemenu
 
         "Nothing.":
             # if we get here, we should jump back to the top so we can
             # continue waiting
-            m 2hub "Oh, good! Let me finish getting ready."
+            m "Oh, good! Let me finish getting ready."
 
     # by default, continue looping
     jump bye_going_somewhere_iowait
@@ -1041,9 +1078,15 @@ label bye_going_somewhere_rtg:
                 store.mas_greetings.TYPE_GENERIC_RET
             )
 
-        #Otherwise we just use the normal outro
+        call mas_transition_from_emptydesk("monika 1eua")
+
+        #Use the normal outro
         m 1eua "I'm ready to go."
         return "quit"
+
+
+    call mas_transition_from_emptydesk("monika 1ekc")
+    call mas_dockstat_abort_post_show
 
     # otherwise, we failed, so monika should tell player
     m 1ekc "Oh no..."
@@ -1065,7 +1108,6 @@ label bye_going_somewhere_rtg:
             m 2wub "Really? Are you sure? Even though it's my own fault I can't go with you..."
             m 1eka "...Thank you, [player]. That means more to me than you could possibly understand."
             $ mas_gainAffection()
-
     return
 
 
@@ -1132,25 +1174,25 @@ label bye_going_somewhere_leavemenu:
         m 1lksdld "That's okay, I guess."
 
     elif mas_isMoniHappy(lower=True):
-        m 1ekd "Oh,{w} all right. Maybe next time?"
+        m 1ekd "Oh,{w=0.3} all right. Maybe next time?"
 
     else:
         # otherwise affection and higher:
         m 2ekp "Aw..."
         m 1hub "Fine, but you better take me next time!"
 
-    m "Are you still going to go?"
+    m 1euc "Are you still going to go?{nw}"
     $ _history_list.pop()
     menu:
         m "Are you still going to go?{fast}"
         "Yes.":
-            if mas_isMoniUpset(higher=True):
+            if mas_isMoniNormal(higher=True):
                 m 2eka "All right. I'll be right here waiting for you, as usual..."
                 m 2hub "So hurry back! I love you, [player]!"
 
             else:
-                # otherwise, distressed and below
-                m 1tfd "...Fine."
+                # otherwise, upset and below
+                m 2tfd "...Fine."
 
             return "quit"
 
@@ -1196,7 +1238,7 @@ label bye_prompt_game:
                     m 1hubfb "Yay!"
                 else:
                     m 2eka "Okay..."
-                jump monika_idle_game
+                jump monika_idle_game.skip_intro
             "No.":
                 if mas_isMoniNormal(higher=True):
                     m 2ekc "Aww..."
@@ -1251,7 +1293,10 @@ label bye_prompt_game:
         m 1eka "Going off to play another game, [player]?"
         m 3hub "Good luck and have fun!"
         m 3eka "Don't forget to come back soon~"
+
     $ persistent._mas_greeting_type = store.mas_greetings.TYPE_GAME
+    #24 hour time cap because greeting handles up to 18 hours
+    $ persistent._mas_greeting_type_timeout = datetime.timedelta(days=1)
     return 'quit'
 
 init 5 python:
@@ -1287,6 +1332,7 @@ default persistent._mas_pm_ate_late_times = 0
 
 label bye_prompt_eat:
     $ _now = datetime.datetime.now().time()
+
     if mas_isMNtoSR(_now):
         $ persistent._mas_pm_ate_late_times += 1
         if mas_isMoniNormal(higher=True):
@@ -1295,9 +1341,9 @@ label bye_prompt_eat:
             m 1eka "Are you planning on having a midnight snack?"
             m 3rksdlb "If I were you, I'd find something to eat a little earlier, ahaha..."
             m 3rksdla "Of course...{w=1}I'd also try to be in bed by now..."
-            if renpy.random.randint(1,25) == 1 and mas_isMoniLove(higher=True):
+            if mas_is18Over() and mas_isMoniLove(higher=True) and renpy.random.randint(1,25) == 1:
                 m 2tubfu "You know, if I were there, maybe we could have a bit of both..."
-                show monika 5ksbfu at t11 zorder MAS_MONIKA_Z with dissolve
+                show monika 5ksbfu at t11 zorder MAS_MONIKA_Z with dissolve_monika
                 m 5ksbfu "We could go to bed, and then - {w=1}you know what, nevermind..."
                 m 5hubfb "Ehehe~"
             else:
@@ -1310,9 +1356,14 @@ label bye_prompt_eat:
             m 4ekc "You should really go to bed, you know."
             m 4eud "...Try to go straight to bed when you're finished."
             m 2euc "Anyway, I guess I'll see you tomorrow..."
+
+        #NOTE: Due to the greet of this having an 18 hour limit, we use a 20 hour cap
+        $ persistent._mas_greeting_type_timeout = datetime.timedelta(hours=20)
         $ persistent.mas_late_farewell = True
 
     else:
+        #NOTE: Since everything but snack uses the same time, we'll set it here
+        $ persistent._mas_greeting_type_timeout = datetime.timedelta(hours=3)
         menu:
             "Breakfast.":
                 if mas_isSRtoN(_now):
@@ -1345,7 +1396,7 @@ label bye_prompt_eat:
                         m 3tku "There's no way you're just having breakfast now, [player]."
                         m 3hub "It's the evening!"
                         m 1eua "Or maybe you're just having breakfast for dinner; I know some people do that occasionally."
-                        m 1tsb "Well, either way, I hope you enjoy your '{i}breakfast{/i}', ehehe~"
+                        m 1tsb "Well, either way, I hope you enjoy your 'breakfast,' ehehe~"
                     else:
                         m 2euc "..."
                         m 4eud "So...you're having a snack."
@@ -1435,6 +1486,9 @@ label bye_prompt_eat:
                     else:
                         m 2euc "Feeling hungry?"
                         m 2eud "Enjoy your snack."
+
+                #Snack gets a shorter time than full meal
+                $ persistent._mas_greeting_type_timeout = datetime.timedelta(minutes=30)
     $ persistent._mas_greeting_type = store.mas_greetings.TYPE_EAT
     return 'quit'
 
@@ -1448,7 +1502,7 @@ label bye_dinner_noon_to_mn:
         m 2euc "I guess it's dinner time for you."
         m 2esd "Well...{w=1}enjoy."
     return
-    
+
 init 5 python:
     addEvent(
         Event(
@@ -1466,13 +1520,13 @@ label bye_prompt_housework:
         m 1eub "Doing your chores, [player]?"
         m 1ekc "I would like to help you out, but there's not really much I can do since I'm stuck in here..."
         m 3eka "Just make sure to come back as soon as you're done, okay?"
-        m 3hub "I'll be waiting here for you."
+        m 3hub "I'll be waiting here for you~"
     elif mas_isMoniUpset():
         m 2esc "Fine."
         m 2tsc "At least you're doing something responsible."
         m 2tfc "{cps=*2}...For once.{/cps}{nw}"
-        $ _history_list.pop()        
-        m 2efc "Goodbye."
+        $ _history_list.pop()
+        m 2esc "Goodbye."
     elif mas_isMoniDis():
         m 6ekc "I see..."
         m 6rkc "I don't want to keep you from completing your household responsibilities."
@@ -1481,4 +1535,30 @@ label bye_prompt_housework:
     else:
         m 6ckc "..."
     $ persistent._mas_greeting_type = store.mas_greetings.TYPE_CHORES
+    $ persistent._mas_greeting_type_timeout = datetime.timedelta(hours=5)
+    return 'quit'
+
+init 5 python:
+    addEvent(
+        Event(
+            persistent.farewell_database,
+            eventlabel="bye_prompt_restart",
+            unlocked=True,
+            prompt="I'm going to restart.",
+            pool=True
+        ),
+        code="BYE"
+    )
+
+label bye_prompt_restart:
+    if mas_isMoniNormal(higher=True):
+        m 1eua "Alright, [player]."
+        m 1eub "See you soon!"
+    elif mas_isMoniBroken():
+        m 6ckc "..."
+    else:
+        m 2euc "Alright."
+
+    $ persistent._mas_greeting_type_timeout = datetime.timedelta(minutes=20)
+    $ persistent._mas_greeting_type = store.mas_greetings.TYPE_RESTART
     return 'quit'
